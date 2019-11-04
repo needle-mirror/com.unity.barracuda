@@ -12,31 +12,32 @@
 
 ## Using Barracuda
 Typically the following steps are needed to use Barracuda in application:
-1. load model,
-2. create inference engine (the worker),
-3. execute model and
-4. fetch results.
+1. add .onnx file to your project - it will behave like any other regular asset,
+2. load model from the asset,
+3. create inference engine (the worker),
+4. execute model and
+5. fetch results.
 
-But first you have to convert your TensorFlow (or ONNX) model to Barracuda format with python scripts. Example usage:
-```bash
-python onnx_to_barracuda.py Models/mnist/model.onnx Destination/mnist.bytes
-```
-See _Converting models to Barracuda_ paragraph below for more information.
+You can import ONNX models simply by adding .onnx file directly to your project, however Tensorflow models require additional attention by running python script for now. See _Converting Tensorflow models to Barracuda format_ paragraph below for more information.
+
 
 ### Load Model into Barracuda
-Once you have your TensorFlow (or ONNX) model converted, you can load resulting Barracuda file via `ModelLoader`:
-```C#
-var model = ModelLoader.LoadFromStreamingAssets(modelName + ".nn");
-```
-Another option is to use editor model importer. Just add public `NNModel` field to your C# script and assing ``.nn`` model file via editor UI:
+To load ONNX model, first add its .onnx file to your project. It will be imported and show up as an asset of type `NNModel`.
+
+Next, add public `NNModel` field to your C# script and assign reference to your asset via editor UI. Load model with `ModelLoader`:
 ```C#
 public NNModel modelSource;
 <..>
 var model = ModelLoader.Load(modelSource);
 ```
 
+To load Tensorflow models that were manually converted with `tensorflow_to_barracuda.py` python script, use the following code:
+```C#
+var model = ModelLoader.LoadFromStreamingAssets(modelName + ".nn");
+```
+
 ### Create inference engine (Worker)
-Inference engine in Barracuda is called Worker. Worker is responsible for converting model into executable tasks and scheduling them on GPU or CPU.
+Inference engine in Barracuda is called Worker. Worker is responsible for breaking down model into executable tasks and scheduling them on GPU or CPU.
 ```C#
 var worker = BarracudaWorkerFactory.CreateWorker(BarracudaWorkerFactory.Type.ComputePrecompiled, model)
 ```
@@ -57,19 +58,20 @@ If model has only single output, then simple `worker.Peek()` can be used, otherw
 ```C#
 var O = worker.Peek(outputName);
 ```
-_Note:_ ``Peek()`` does not take ownership of the tensor. If you expect to keep tensor for longer time use ``Fetch()``
+_Note:_ `worker.Peek()` does not transfer ownership of the tensor to you and tensor will still be owned by the `worker`. Calling `worker.Peek()` is preferable way and allows to reduce memory allocations. However, if you expect to use tensor for longer time, call `worker.Fetch()` - otherwise tensor values will be lost after the next call to `worker.Execute()` or after call to `worker.Dispose()`
 
 ### Cleanup
-As a Barracuda client you are responsible to `Dispose` _worker_, _inputs_ and _outputs_ you fetched. This is necessary to properly free GPU resources.
+As a Barracuda client you are responsible to `Dispose` _worker_, _inputs_ and _outputs_ you created, received via `worker.Fetch()` or taken ownership by calling `tensor.TakeOwnership()`. This is necessary to properly free GPU resources.
 ```C#
 O.Dispose();
 worker.Dispose();
 ```
+_Note:_ It is not necessary to `Dispose` tensor that you received via ``worker.Peek()`` call.
 
 ## Working with data
 
 ### Tensor
-Barracuda stores data in `batch`,`height`,`width`,`channels` also known as _NHWC_ or _channels-last_ format. You can interact with `Tensor` data via multi-dimensional array operators:
+Tensor values in Barracuda are accessed via  `batch`,`height`,`width`,`channels` layout also known as _NHWC_ or _channels-last_. You can interact with `Tensor` data via multi-dimensional array operators:
 ```C#
 var tensor = new Tensor(batchCount, height, width, channelCount);
 tensor[n, y, x, c] = 1.0f; // as N batches of 3 dimensional data: N x {X, Y, C}
@@ -77,7 +79,7 @@ tensor[n,       c] = 2.0f; // as N batches of 1 dimensional data: N x {C}
 tensor[         i] = 3.0f; // as flat array
 ```
 
-There are number of `Tensor` constructors that cover variety of scenarios. By default tensors are initialized with `0` upon construction, unless intialization `Array` is provided.
+There are number of `Tensor` constructors that cover a variety of scenarios. By default tensors are initialized with `0` upon construction, unless initialization `Array` is provided.
 ```C#
 tensor = new Tensor(batchCount, height, width, channelCount);    // batch of 3 dimensional data, 0 initialized: batchCount x {height, width, channelCount}
 tensor = new Tensor(batchCount, elementCount);                   // batch of 1 dimensional data, 0 initialized: batchCount x {elementCount}
@@ -92,7 +94,7 @@ Texture2D texture = ...;
 tensor = new Tensor(texture);                                    // tensor initialized with texture data: 1 x { texture.width, texture.height, 3}
 ```
 
-You can query shape of the `Tensor` object, but you can not change it. Shape of the `Tensor` is immutable. If you want to have different shape of `Tensor`, you have to construct the new instance of `Tensor` object.
+You can query shape of the `Tensor` object, but you can not change it. Shape of the `Tensor` is immutable. If you want to have different shape of `Tensor`, you have to construct a new instance of `Tensor` object.
 ```C#
 var shape = tensor.shape;
 Debug.Log(shape + " or " + shape.batch + shape.height + shape.width + shape.channels);
@@ -141,19 +143,19 @@ foreach (var layer in model.layers)
 You can turn on verbose mode for different parts of Barracuda:
 ```C#
 bool verbose = true;
-var model = ModelLoader.LoadFromStreamingAssets(modelName + ".bytes", verbose); // verbose loader
-var worker = BarracudaWorkerFactory.CreateWorker(BarracudaWorkerFactory.Type.ComputeFast, model, verbose); // verbose execution
+var model = ModelLoader.LoadModel(onnxAsset, verbose); // verbose loader
+var worker = BarracudaWorkerFactory.CreateWorker(BarracudaWorkerFactory.Type.ComputePrecompiled, model, verbose); // verbose execution
 ```
 
-## Converting TensorFlow and ONNX models to Barracuda format
-Barracuda comes with dedicated python scripts to convert pre-trained TensorFlow and ONNX models to Barracuda format.
+## Converting TensorFlow models to Barracuda format
+Barracuda comes with dedicated python scripts to convert pre-trained TensorFlow models to Barracuda format.
 
 Convert from TensorFlow:
 ```bash
 python tensorflow_to_barracuda.py Models/3DBall-tf-model.pb Destination/3DBall-bc.nn
 ```
 
-Convert from ONNX:
+There is legacy converter from ONNX:
 ```bash
 python onnx_to_barracuda.py Models/mnist/model.onnx Destination/mnist-bc.nn
 ```
@@ -163,30 +165,90 @@ For example:
 ```bash
 python tensorflow_to_barracuda.py Models/3DBall-tf-model.pb Destination/3DBall-bc.bytes -trim action$
 ```
-Trim will first remove outputs that do not match regular expression from the graph. In this case only output that ends with `action` will be left.
-Next trim will strip all nodes that do not participate in the evaluation of the output.
+First, trim will remove outputs from the graph that do not match regexp pattern. Second trim will strip all nodes that do not participate in the evaluation of the output.
+In the example above only outputs that end with `action` will be left.
 
 You could pass `--print-supported-ops` to get approximate list of supported operations/activations for specific converter.
 
-## Approximate list of supported layers/operations for TensorFlow converter
+P.S. Python 3.5 or 3.6 is recommended
+P.P.S. We plan to migrate Tensorflow converter from Python to C# in the future.
+
+## Approximate list of ONNX operations supported by Barracuda
+
+### Operations
 ```
-Activation
+Add
+Sum
+Sub
+Mul
+Div
+Pow
+Min
+Max
+Mean
+AveragePool
+MaxPool
+GlobalAveragePool
+GlobalMaxPool
+Upsample
+Gemm
+MatMul
+Conv
+ConvTranspose
+BatchNormalization
+InstanceNormalization
+Greater
+Less
+Equal
+Or
+And 
+Not 
+Xor
+Pad
+Constant
+Identity
+Cast
+Dropout
+Reshape
+Unsqueeze
+Squeeze
+Flatten
+Concat
+Slice
+```
+P.S. some of these operations are under limited support
+
+### Activations
+```Relu
+Softmax
+Tanh
+Sigmoid
+Elu
+LeakyRelu
+Selu
+```
+
+## Approximate list of TensorFlow nodes supported by Barracuda script converter
+### Operations
+```
 Add
 AvgPool
 BatchNormalization
 BatchNormalizationRuntime
 BiasAdd
+Ceil
 Concat
 Conv2D
 Conv2DBackpropInput
 Dense
 DepthwiseConv2dNative
+Exp
 Flatten
+Floor
 FusedBatchNorm
 GlobalAveragePool
 GlobalAvgPool
 InstanceNormalization
-LRN
 MatMul
 Max
 MaxPool
@@ -197,6 +259,7 @@ Minimum
 Mul
 Multinomial
 Nop
+Neg
 OneHot
 Pad
 Pow
@@ -209,49 +272,26 @@ ResizeBicubic
 ResizeBilinear
 ResizeNearestNeighbor
 StridedSlice
+Sqrt
 Sub
 Sum
-
 ```
 
-## Approximate list of supported activations for TensorFlow converter
+### Activations
 ```
-Abs
-Acos
-Acosh
-Asin
-Asinh
-Atan
-Atanh
-Ceil
-Cos
-Cosh
 Elu
-Exp
-Floor
 LeakyRelu
 Linear
 Log
 LogSoftmax
-Neg
 Relu
 Relu6
 Selu
 Sigmoid
-Sin
-Sinh
 Softmax
 Softplus
 Softsign
-Sqrt
 Swish
-Tan
-Tanh
 ```
-
-P.S. some of these operations are under limited support and not all configurations are properly supported 
-
-P.P.S. Python 3.5 or 3.6 is recommended
-
-P.P.P.S. We plan to migrate Tensorflow and ONNX converters from Python to C# in the future.
+P.S. some of these nodes are under limited support 
 
