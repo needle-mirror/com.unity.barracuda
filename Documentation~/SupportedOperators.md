@@ -6,13 +6,15 @@ Barracuda currently supports the following [ONNX operators](https://github.com/o
 * <a href="#Constant">Constant</a>
 * Reshape
 * Shape
-* <a href="#Unsqueeze">Unsqueeze</a>
-* <a href="#Squeeze">Squeeze</a>
+* Unsqueeze
+* Squeeze
 * Flatten
 * Concat
+* Expand
 * Slice
 * Gather
 * <a href="#OneHot">OneHot</a>
+* TopK
 * LSTM
 * Add
 * Sum
@@ -86,14 +88,6 @@ Barracuda currently supports the following [ONNX operators](https://github.com/o
 
 #### <a name="Constant">**Constant**</a>
 <dt><tt>sparse_value</tt> : not supported</dt>
-<br/>
-
-#### <a name="Unsqueeze">**Unsqueeze**</a>
-<dt><tt>axis <= 1 </tt> : not supported</dt>
-<br/>
-
-#### <a name="Squeeze">**Squeeze**</a>
-<dt><tt>axis <= 1 </tt> : not supported</dt>
 <br/>
 
 #### <a name="OneHot">**OneHot**</a>
