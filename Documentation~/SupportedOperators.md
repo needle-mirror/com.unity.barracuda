@@ -26,6 +26,7 @@ Barracuda currently supports the following [ONNX operators](https://github.com/o
 * Max
 * Mean
 * Greater
+* Less
 * Equal
 * Or
 * And
@@ -59,6 +60,9 @@ Barracuda currently supports the following [ONNX operators](https://github.com/o
 * Identity
 * Cast
 * Dropout
+* DepthToSpace
+* SpaceToDepth
+* LRN
   
 
 ### Activations
@@ -80,6 +84,17 @@ Barracuda currently supports the following [ONNX operators](https://github.com/o
 * Ceil
 * Floor
 * Clip
+* Acos
+* Acosh
+* Asin
+* Asinh
+* Atan
+* Atanh
+* Cos
+* Cosh
+* Sin
+* Sinh
+* Tan
 
 <br/>
 
