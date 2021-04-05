@@ -48,5 +48,5 @@ If you have issues running Barracuda in your Unity project, please report them o
 ## Requirements
 The current version of Barracuda is compatible with the following versions of the Unity Editor:
 
-* 2019.4.x and later
+* 2019.4.29f1 and later
 
