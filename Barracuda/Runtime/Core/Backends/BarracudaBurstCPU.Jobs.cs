@@ -1307,13 +1307,21 @@ public partial class BurstCPUOps
         public ReadOnlyMemResource X { get; set; }
         public ReadOnlyMemResource B { get; set; }
         public ReadWriteMemResource O { get; set; }
-        [ReadOnly] public int inChannels;
-        public void Execute(int y)
+        [ReadOnly] public int offsetReduce;
+        [ReadOnly] public int reduceDim;
+        public void Execute(int i)
         {
-            float accum = 0f;
-            for (int i = 0; i < inChannels; ++i)
-                accum += math.exp(X.ptr[y * inChannels + i] - B.ptr[y]);
-            O.ptr[y] = accum;
+            int x = i % offsetReduce;
+            int y = i / offsetReduce;
+
+            float accum = 0.0f;
+            for (int z = 0; z < reduceDim; ++z)
+            {
+                float v = X.ptr[y * offsetReduce * reduceDim + z * offsetReduce + x];
+                float b = B.ptr[y * offsetReduce + x];
+                accum += math.exp(v - b);
+            }
+            O.ptr[y * offsetReduce + x] = accum;
         }
     }
 
@@ -1324,11 +1332,15 @@ public partial class BurstCPUOps
         public ReadOnlyMemResource S { get; set; }
         public ReadOnlyMemResource B { get; set; }
         public ReadWriteMemResource O { get; set; }
-        [ReadOnly] public int inChannels;
+        [ReadOnly] public int offsetReduce;
+        [ReadOnly] public int reduceDim;
         public void Execute(int i)
         {
-            int n = (i / inChannels);
-            O.ptr[i] = math.exp(X.ptr[i] - B.ptr[n]) / S.ptr[n];
+            int x = i % offsetReduce;
+            int y = ((i / offsetReduce) % reduceDim);
+            int z = ((i / offsetReduce) / reduceDim);
+
+            O.ptr[i] = math.exp(X.ptr[i] - B.ptr[z * offsetReduce + x]) / S.ptr[z * offsetReduce + x];
         }
     }
 
@@ -1814,7 +1826,7 @@ public partial class BurstCPUOps
         [ReadOnly] public TensorShape shapeO;
         [ReadOnly] public TensorShape shapeX;
         [ReadOnly] public int strideS, strideR, strideN, strideT;
-        [ReadOnly] public int strideD, strideH, strideW;
+        [ReadOnly] public int strideD, strideH, strideW, strideC;
         [ReadOnly] public int startS, startR, startN, startT;
         [ReadOnly] public int startD, startH, startW, startC;
         public void Execute(int threadIndex)
@@ -1830,7 +1842,7 @@ public partial class BurstCPUOps
             d = startD + d * strideD;
             h = startH + h * strideH;
             w = startW + w * strideW;
-            c = startC + c;
+            c = startC + c * strideC;
             int indexX = shapeX.Index(s, r, n, t, d, h, w, c);
             UnsafeUtility.MemCpy(destination: O.ptr+indexO, source: X.ptr+indexX, size: shapeO.channels * sizeof(float));
         }
@@ -2217,6 +2229,462 @@ public partial class BurstCPUOps
                 O.ptr[idx] = v;
             else
                 O.ptr[idx] = v;
+        }
+    }
+
+    [BurstCompile(OptimizeFor = OptimizeFor.Performance, FloatMode = FloatMode.Default, FloatPrecision = FloatPrecision.Standard)]
+    unsafe struct LSTMEndJob : IJobParallelFor
+    {
+        [NoAlias][NativeDisableUnsafePtrRestriction][ReadOnly] public unsafe float* i_mad_w;
+        [NoAlias][NativeDisableUnsafePtrRestriction][ReadOnly] public unsafe float* j_mad_w;
+        [NoAlias][NativeDisableUnsafePtrRestriction][ReadOnly] public unsafe float* f_mad_w;
+        [NoAlias][NativeDisableUnsafePtrRestriction][ReadOnly] public unsafe float* o_mad_w;
+        [NoAlias][NativeDisableUnsafePtrRestriction][ReadOnly] public unsafe float* i_mad_r;
+        [NoAlias][NativeDisableUnsafePtrRestriction][ReadOnly] public unsafe float* j_mad_r;
+        [NoAlias][NativeDisableUnsafePtrRestriction][ReadOnly] public unsafe float* f_mad_r;
+        [NoAlias][NativeDisableUnsafePtrRestriction][ReadOnly] public unsafe float* o_mad_r;
+
+        [NoAlias][NativeDisableUnsafePtrRestriction][ReadOnly] public unsafe float* cell;
+
+        [NoAlias][NativeDisableUnsafePtrRestriction] public unsafe float* O;
+        [NoAlias][NativeDisableUnsafePtrRestriction] public unsafe float* cell_out;
+        [NoAlias][NativeDisableUnsafePtrRestriction] public unsafe float* hidden_out;
+
+        public int sequenceIndexO, sequenceIndexI;
+        public int batchSize, hiddenSize;
+        public int batchSizeR;
+
+        public JobHandle Schedule(int arrayLength, int innerloopBatchCount, JobHandle dependsOn)
+        {
+            return IJobParallelForExtensions.Schedule(this, arrayLength, innerloopBatchCount, dependsOn);
+        }
+
+        public void Execute(int threadId)
+        {
+            int b_tID = (threadId / hiddenSize);
+            int h_tID = (threadId % hiddenSize);
+            int threadId_r = (b_tID % batchSizeR) * hiddenSize + h_tID;
+            float i_mad = i_mad_w[batchSize * hiddenSize * sequenceIndexI + threadId] + i_mad_r[threadId_r];
+            float j_mad = j_mad_w[batchSize * hiddenSize * sequenceIndexI + threadId] + j_mad_r[threadId_r];
+            float f_mad = f_mad_w[batchSize * hiddenSize * sequenceIndexI + threadId] + f_mad_r[threadId_r];
+            float o_mad = o_mad_w[batchSize * hiddenSize * sequenceIndexI + threadId] + o_mad_r[threadId_r];
+
+            float i = 1f / (1f + math.exp(-i_mad));
+            float j = math.tanh(j_mad);
+            float f = 1f / (1f + math.exp(-f_mad));
+            float o = 1f / (1f + math.exp(-o_mad));
+               
+            float state_c_mul = cell[threadId_r] * f;
+            float i_j_mul = i * j;
+            float state_c = state_c_mul + i_j_mul;
+            float state_c_tanh = math.tanh(state_c);
+            float state_h = o * state_c_tanh;
+
+            O[batchSize * hiddenSize * sequenceIndexO + threadId] = state_h;
+            hidden_out[threadId] = state_h;
+            cell_out[threadId] = state_c;
+        }
+    }
+
+    [BurstCompile(OptimizeFor = OptimizeFor.Performance, FloatMode = FloatMode.Fast, FloatPrecision = FloatPrecision.Low)]
+    unsafe struct LSTMDense3Job : IJobParallelFor
+    {
+        [NoAlias][NativeDisableUnsafePtrRestriction][ReadOnly] public unsafe float* A;
+        public int AB, AN, AM;
+        [NoAlias][NativeDisableUnsafePtrRestriction][ReadOnly] public unsafe float* B;
+        public int BN, BM;
+        [NoAlias][NativeDisableUnsafePtrRestriction][ReadOnly] public unsafe float* C;
+        public int CN, CM;
+
+        [NoAlias][NativeDisableUnsafePtrRestriction] public unsafe float* S;
+        public int SN, SM;
+
+        public int dispatchThreadX, dispatchThreadY, dispatchThreadZ;
+        public const int blockSize = 16;
+
+        public JobHandle Schedule(JobHandle dependsOn)
+        {
+            return Schedule(blocksBatchCount:1, dependsOn);
+        }
+        public JobHandle Schedule(int blocksBatchCount, JobHandle dependsOn)
+        {
+            return IJobParallelForExtensions.Schedule(this, dispatchThreadX * dispatchThreadY * dispatchThreadZ, blocksBatchCount, dependsOn);
+        }
+
+
+        public void Execute(int threadID)
+        {
+            int dispatchThreadXY = dispatchThreadX * dispatchThreadY;
+
+            int batch = (threadID / dispatchThreadXY);
+            int i = (threadID % dispatchThreadXY) % dispatchThreadX;
+            int j = (threadID % dispatchThreadXY) / dispatchThreadX;
+
+            int batchOffSetA = (batch * AN * AM);
+            int batchOffSetS = (batch * SN * SM);
+
+            int rowA = i * blockSize;
+            int colB = j * blockSize;
+
+            unsafe
+            {
+                float* blockTempA = null;
+                float* blockTempB = null;
+                float* blockTempS = null;
+
+                float* blockS = S + rowA * SM + colB + batchOffSetS;
+                int strideS = SM;
+
+                if (rowA + blockSize > SN || colB + blockSize > SM) // copy remainder of C into zero-padded block
+                {
+                    blockTempS = AllocBlock();
+                    strideS = blockSize;
+                    blockS = blockTempS;
+                }
+                for (int y = 0; y < blockSize; y++)
+                    for (int x = 0; x < blockSize; x++)
+                        blockS[x + strideS * y] = (colB + x) < BM ? C[(colB + x)%CM] : 0.0f;
+
+                for (int l = 0; l < AM; l += blockSize) // inner-loop
+                {
+                    float* blockA = A + rowA * AM + l + batchOffSetA;
+                    float* blockB = B + l * BM + colB;
+                    int strideA = AM;
+                    int strideB = BM;
+
+                    if (rowA + blockSize > AN || l + blockSize > AM) // copy remainder of A into zero-padded block
+                    {
+                        if (blockTempA == null)
+                            blockTempA = AllocBlock();
+                        strideA = blockSize;
+
+                        for (int y = 0; y < blockSize; y++)
+                            for (int x = 0; x < blockSize; x++)
+                                blockTempA[x + blockSize * y] = ((rowA + y) < AN && (l + x < AM)) ? blockA[x + AM * y] : 0.0f;
+
+                        blockA = blockTempA;
+                    }
+
+                    if (colB + blockSize > BM || l + blockSize > BN) // copy remainder of B into zero-padded block
+                    {
+                        if (blockTempB == null)
+                            blockTempB = AllocBlock();
+                        strideB = blockSize;
+
+                        for (int y = 0; y < blockSize; y++)
+                            for (int x = 0; x < blockSize; x++)
+                                blockTempB[x + blockSize * y] = ((colB + x) < BM && (l + y < BN)) ? blockB[x + BM * y] : 0.0f;
+
+                        blockB = blockTempB;
+                    }
+
+                    MultiplyBlockUnroll16xh(blockA, strideA, blockB, strideB, blockS, strideS);
+                }
+
+                if (blockS == blockTempS) // copy back
+                {
+                    for (int y = 0; y < blockSize; y++)
+                        for (int x = 0; x < blockSize; x++)
+                        {
+                            if (((rowA + y) < SN) && ((colB + x) < SM))
+                                S[(rowA + y) * SM + (colB + x) + batchOffSetS] = blockTempS[x + blockSize * y];
+                        }
+                }
+
+                FreeBlock(blockTempA);
+                FreeBlock(blockTempB);
+                FreeBlock(blockTempS);
+            }
+        }
+
+        static unsafe float* AllocBlock()
+        {
+            const int sz = blockSize * blockSize * sizeof(float);
+            return (float*)UnsafeUtility.Malloc(sz, JobsUtility.CacheLineSize, Allocator.TempJob);
+        }
+
+        static unsafe void FreeBlock(float* ptr)
+        {
+            if (ptr != null)
+                UnsafeUtility.Free(ptr, Allocator.TempJob);
+        }
+
+        static unsafe void MultiplyBlockUnroll16xh(float* Ap, int Astride, float* Bp, int Bstride, float* Sp, int Sstride)
+        {
+            for (int i = 0; i < blockSize; i++)
+            {
+                float sum0 = *(Sp + i * Sstride + 0);
+                float sum1 = *(Sp + i * Sstride + 1);
+                float sum2 = *(Sp + i * Sstride + 2);
+                float sum3 = *(Sp + i * Sstride + 3);
+                float sum4 = *(Sp + i * Sstride + 4);
+                float sum5 = *(Sp + i * Sstride + 5);
+                float sum6 = *(Sp + i * Sstride + 6);
+                float sum7 = *(Sp + i * Sstride + 7);
+                float sum8 = *(Sp + i * Sstride + 8);
+                float sum9 = *(Sp + i * Sstride + 9);
+                float sumA = *(Sp + i * Sstride + 10);
+                float sumB = *(Sp + i * Sstride + 11);
+                float sumC = *(Sp + i * Sstride + 12);
+                float sumD = *(Sp + i * Sstride + 13);
+                float sumE = *(Sp + i * Sstride + 14);
+                float sumF = *(Sp + i * Sstride + 15);
+
+                for (int l = 0; l < blockSize; l++)
+                {
+                    float A = *(Ap + i * Astride + l);
+
+                    float B0 = *(Bp + l * Bstride + 0);
+                    float B1 = *(Bp + l * Bstride + 1);
+                    float B2 = *(Bp + l * Bstride + 2);
+                    float B3 = *(Bp + l * Bstride + 3);
+                    float B4 = *(Bp + l * Bstride + 4);
+                    float B5 = *(Bp + l * Bstride + 5);
+                    float B6 = *(Bp + l * Bstride + 6);
+                    float B7 = *(Bp + l * Bstride + 7);
+                    float B8 = *(Bp + l * Bstride + 8);
+                    float B9 = *(Bp + l * Bstride + 9);
+                    float BA = *(Bp + l * Bstride + 10);
+                    float BB = *(Bp + l * Bstride + 11);
+                    float BC = *(Bp + l * Bstride + 12);
+                    float BD = *(Bp + l * Bstride + 13);
+                    float BE = *(Bp + l * Bstride + 14);
+                    float BF = *(Bp + l * Bstride + 15);
+
+
+                    sum0 += A * B0;
+                    sum1 += A * B1;
+                    sum2 += A * B2;
+                    sum3 += A * B3;
+                    sum4 += A * B4;
+                    sum5 += A * B5;
+                    sum6 += A * B6;
+                    sum7 += A * B7;
+                    sum8 += A * B8;
+                    sum9 += A * B9;
+                    sumA += A * BA;
+                    sumB += A * BB;
+                    sumC += A * BC;
+                    sumD += A * BD;
+                    sumE += A * BE;
+                    sumF += A * BF;
+                }
+
+                *(Sp + i * Sstride + 0 ) = sum0;
+                *(Sp + i * Sstride + 1 ) = sum1;
+                *(Sp + i * Sstride + 2 ) = sum2;
+                *(Sp + i * Sstride + 3 ) = sum3;
+                *(Sp + i * Sstride + 4 ) = sum4;
+                *(Sp + i * Sstride + 5 ) = sum5;
+                *(Sp + i * Sstride + 6 ) = sum6;
+                *(Sp + i * Sstride + 7 ) = sum7;
+                *(Sp + i * Sstride + 8 ) = sum8;
+                *(Sp + i * Sstride + 9 ) = sum9;
+                *(Sp + i * Sstride + 10) = sumA;
+                *(Sp + i * Sstride + 11) = sumB;
+                *(Sp + i * Sstride + 12) = sumC;
+                *(Sp + i * Sstride + 13) = sumD;
+                *(Sp + i * Sstride + 14) = sumE;
+                *(Sp + i * Sstride + 15) = sumF;
+            }
+        }
+    }
+
+    [BurstCompile(OptimizeFor = OptimizeFor.Performance, FloatMode = FloatMode.Fast, FloatPrecision = FloatPrecision.Low)]
+    unsafe struct LSTMDenseJob : IJobParallelFor
+    {
+        [NoAlias][NativeDisableUnsafePtrRestriction][ReadOnly] public unsafe float* A;
+        public int AN, AM;
+        [NoAlias][NativeDisableUnsafePtrRestriction][ReadOnly] public unsafe float* B;
+        public int BN, BM;
+        [NoAlias][NativeDisableUnsafePtrRestriction][ReadOnly] public unsafe float* C;
+        public int CN, CM;
+
+        [NoAlias][NativeDisableUnsafePtrRestriction] public unsafe float* S;
+        public int SN, SM;
+
+        public int dispatchThreadX, dispatchThreadY;
+        public const int blockSize = 16;
+
+        public JobHandle Schedule(JobHandle dependsOn)
+        {
+            return Schedule(blocksBatchCount: 1, dependsOn);
+        }
+        public JobHandle Schedule(int blocksBatchCount, JobHandle dependsOn)
+        {
+            return IJobParallelForExtensions.Schedule(this, dispatchThreadX * dispatchThreadY, blocksBatchCount, dependsOn);
+        }
+
+
+        public void Execute(int threadID)
+        {
+            int i = (threadID % dispatchThreadX);
+            int j = (threadID / dispatchThreadX);
+
+            int rowA = i * blockSize;
+            int colB = j * blockSize;
+
+            unsafe
+            {
+                float* blockTempA = null;
+                float* blockTempB = null;
+                float* blockTempS = null;
+
+                float* blockS = S + rowA * SM + colB;
+                int strideS = SM;
+
+                if (rowA + blockSize > SN || colB + blockSize > SM) // copy remainder of C into zero-padded block
+                {
+                    blockTempS = AllocBlock();
+                    strideS = blockSize;
+                    blockS = blockTempS;
+                }
+                for (int y = 0; y < blockSize; y++)
+                    for (int x = 0; x < blockSize; x++)
+                        blockS[x + strideS * y] = (colB + x) < BM ? C[(colB + x)%CM] : 0.0f;
+
+                for (int l = 0; l < AM; l += blockSize) // inner-loop
+                {
+                    float* blockA = A + rowA * AM + l;
+                    float* blockB = B + l * BM + colB;
+                    int strideA = AM;
+                    int strideB = BM;
+
+                    if (rowA + blockSize > AN || l + blockSize > AM) // copy remainder of A into zero-padded block
+                    {
+                        if (blockTempA == null)
+                            blockTempA = AllocBlock();
+                        strideA = blockSize;
+
+                        for (int y = 0; y < blockSize; y++)
+                            for (int x = 0; x < blockSize; x++)
+                                blockTempA[x + blockSize * y] = ((rowA + y) < AN && (l + x < AM)) ? blockA[x + AM * y] : 0.0f;
+
+                        blockA = blockTempA;
+                    }
+
+                    if (colB + blockSize > BM || l + blockSize > BN) // copy remainder of B into zero-padded block
+                    {
+                        if (blockTempB == null)
+                            blockTempB = AllocBlock();
+                        strideB = blockSize;
+
+                        for (int y = 0; y < blockSize; y++)
+                            for (int x = 0; x < blockSize; x++)
+                                blockTempB[x + blockSize * y] = ((colB + x) < BM && (l + y < BN)) ? blockB[x + BM * y] : 0.0f;
+
+                        blockB = blockTempB;
+                    }
+
+                    MultiplyBlockUnroll16xh(blockA, strideA, blockB, strideB, blockS, strideS);
+                }
+
+                if (blockS == blockTempS) // copy back
+                {
+                    for (int y = 0; y < blockSize; y++)
+                        for (int x = 0; x < blockSize; x++)
+                        {
+                            if (((rowA + y) < SN) && ((colB + x) < SM))
+                                S[(rowA + y) * SM + (colB + x)] = blockTempS[x + blockSize * y];
+                        }
+                }
+
+                FreeBlock(blockTempA);
+                FreeBlock(blockTempB);
+                FreeBlock(blockTempS);
+            }
+        }
+
+        static unsafe float* AllocBlock()
+        {
+            const int sz = blockSize * blockSize * sizeof(float);
+            return (float*)UnsafeUtility.Malloc(sz, JobsUtility.CacheLineSize, Allocator.TempJob);
+        }
+
+        static unsafe void FreeBlock(float* ptr)
+        {
+            if (ptr != null)
+                UnsafeUtility.Free(ptr, Allocator.TempJob);
+        }
+
+        static unsafe void MultiplyBlockUnroll16xh(float* Ap, int Astride, float* Bp, int Bstride, float* Sp, int Sstride)
+        {
+            for (int i = 0; i < blockSize; i++)
+            {
+                float sum0 = *(Sp + i * Sstride + 0);
+                float sum1 = *(Sp + i * Sstride + 1);
+                float sum2 = *(Sp + i * Sstride + 2);
+                float sum3 = *(Sp + i * Sstride + 3);
+                float sum4 = *(Sp + i * Sstride + 4);
+                float sum5 = *(Sp + i * Sstride + 5);
+                float sum6 = *(Sp + i * Sstride + 6);
+                float sum7 = *(Sp + i * Sstride + 7);
+                float sum8 = *(Sp + i * Sstride + 8);
+                float sum9 = *(Sp + i * Sstride + 9);
+                float sumA = *(Sp + i * Sstride + 10);
+                float sumB = *(Sp + i * Sstride + 11);
+                float sumC = *(Sp + i * Sstride + 12);
+                float sumD = *(Sp + i * Sstride + 13);
+                float sumE = *(Sp + i * Sstride + 14);
+                float sumF = *(Sp + i * Sstride + 15);
+
+                for (int l = 0; l < blockSize; l++)
+                {
+                    float A = *(Ap + i * Astride + l);
+
+                    float B0 = *(Bp + l * Bstride + 0);
+                    float B1 = *(Bp + l * Bstride + 1);
+                    float B2 = *(Bp + l * Bstride + 2);
+                    float B3 = *(Bp + l * Bstride + 3);
+                    float B4 = *(Bp + l * Bstride + 4);
+                    float B5 = *(Bp + l * Bstride + 5);
+                    float B6 = *(Bp + l * Bstride + 6);
+                    float B7 = *(Bp + l * Bstride + 7);
+                    float B8 = *(Bp + l * Bstride + 8);
+                    float B9 = *(Bp + l * Bstride + 9);
+                    float BA = *(Bp + l * Bstride + 10);
+                    float BB = *(Bp + l * Bstride + 11);
+                    float BC = *(Bp + l * Bstride + 12);
+                    float BD = *(Bp + l * Bstride + 13);
+                    float BE = *(Bp + l * Bstride + 14);
+                    float BF = *(Bp + l * Bstride + 15);
+
+
+                    sum0 += A * B0;
+                    sum1 += A * B1;
+                    sum2 += A * B2;
+                    sum3 += A * B3;
+                    sum4 += A * B4;
+                    sum5 += A * B5;
+                    sum6 += A * B6;
+                    sum7 += A * B7;
+                    sum8 += A * B8;
+                    sum9 += A * B9;
+                    sumA += A * BA;
+                    sumB += A * BB;
+                    sumC += A * BC;
+                    sumD += A * BD;
+                    sumE += A * BE;
+                    sumF += A * BF;
+                }
+
+                *(Sp + i * Sstride + 0) = sum0;
+                *(Sp + i * Sstride + 1) = sum1;
+                *(Sp + i * Sstride + 2) = sum2;
+                *(Sp + i * Sstride + 3) = sum3;
+                *(Sp + i * Sstride + 4) = sum4;
+                *(Sp + i * Sstride + 5) = sum5;
+                *(Sp + i * Sstride + 6) = sum6;
+                *(Sp + i * Sstride + 7) = sum7;
+                *(Sp + i * Sstride + 8) = sum8;
+                *(Sp + i * Sstride + 9) = sum9;
+                *(Sp + i * Sstride + 10) = sumA;
+                *(Sp + i * Sstride + 11) = sumB;
+                *(Sp + i * Sstride + 12) = sumC;
+                *(Sp + i * Sstride + 13) = sumD;
+                *(Sp + i * Sstride + 14) = sumE;
+                *(Sp + i * Sstride + 15) = sumF;
+            }
         }
     }
 }

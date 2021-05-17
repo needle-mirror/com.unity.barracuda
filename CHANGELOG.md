@@ -4,6 +4,28 @@ All notable changes to this package will be documented in this file.
 The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/)
 and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.html).
 
+## [2.1.0] - 2021-05-17
+### Added
+- ONNX: Added support for the `metadata_props` field, which is exposed as a <string,string> dictionary with `Model.Metadata`
+
+### Changed
+- Improved `Slice` range handling
+- Empty tensor buffers are now filled with `-1` instead of the random data, helps to reduce accidental errors
+- Greatly reduced memory allocation when using GPU backends (no more CPU mem cache for intermediate tensors). Mostly helps mobiles with unified memory architecture
+- Improved `SoftMax` performance
+- Improved `LSTM` performance on CPU
+
+### Fixed
+- Fixed default axis to `channels` in `ModelBuilder.SoftMax`
+- Fixed `Optimize Model` checkbox in model importer UI
+- Fixed crash when tensor is created on CPU and later is moved to GPU
+- Fixed out of bounds write in NCHW path
+- Fixed crash in Tensor finalizers when using `CSharpBurst` backend
+- Fixed Gather behavior for rank3 tensors
+
+### Known issues
+- There is small regression in ARMv7 performance when running `CSharpBurst` backend. It can be worked around on most of the phones by shipping ARMv8(ARM64) builds
+
 ## [2.0.0] - 2021-04-05
 ### Changed
 - Combined verified release of 1.1.x-1.4.x improvements
