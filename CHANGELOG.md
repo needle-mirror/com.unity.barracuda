@@ -5,7 +5,11 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/)
 and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.html).
 
 ## [2.0.0] - 2021-04-05
+### Changed
 - Combined verified release of 1.1.x-1.4.x improvements
+
+### Fixed
+- Fixed Transpose removal pass for ML-Agents networks.
 
 ## [1.4.0] - 2021-04-01
 ### Added
