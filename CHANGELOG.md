@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
 ## [2.0.0] - 2021-04-05
 ### Changed
 - Combined verified release of 1.1.x-1.4.x improvements
-- Burst updated to 1.6.0-pre.2
+- Burst updated to 1.6.0-pre.4
 
 ### Fixed
 - Fixed Transpose removal pass for ML-Agents networks.
