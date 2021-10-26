@@ -1,7 +1,7 @@
 {
   "name": "com.unity.barracuda",
   "displayName": "Barracuda",
-  "version": "2.3.0-preview",
+  "version": "2.3.1-preview",
   "unity": "2019.4",
   "description": "Barracuda is lightweight and cross-platform Neural Net inference library. Barracuda supports inference both on GPU and CPU.",
   "dependencies": {
@@ -10,11 +10,11 @@
     "com.unity.modules.imageconversion": "1.0.0"
   },
   "upmCi": {
-    "footprint": "96c4a998047da9cf29be81f10451a59f3d2f6af9"
+    "footprint": "6ddc5f0210a35d4a9d576c30e58f1e1dd68359b2"
   },
   "repository": {
     "url": "https://github.cds.internal.unity3d.com/unity/UnityInferenceEngine.git",
     "type": "git",
-    "revision": "ebe94fd0d42bb367d3d3e278e0f49c7085a4a924"
+    "revision": "d35576b27abf3d0457010f642c17d58ef2836f7f"
   }
 }
